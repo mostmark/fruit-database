@@ -12,7 +12,7 @@ import io.quarkus.hibernate.orm.panache.PanacheEntityBase;
 
 @Entity
 @Cacheable
-public class FruitEntity extends PanacheEntityBase {
+public class Fruit extends PanacheEntityBase {
 
     @Id
     @SequenceGenerator(
@@ -26,10 +26,10 @@ public class FruitEntity extends PanacheEntityBase {
     @Column(length = 40, unique = true)
     public String name;
 
-    public FruitEntity() {
+    public Fruit() {
     }
 
-    public FruitEntity(String name) {
+    public Fruit(String name) {
         this.name = name;
     }
 }
