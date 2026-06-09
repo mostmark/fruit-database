@@ -31,6 +31,11 @@ components:
       cpuLimit: "4"
 
       env:
+        # JDK selection. Maven and Quarkus read the JDK from JAVA_HOME directly, so
+        # this alone makes dev mode build and run on Java 21 (PATH is handled below).
+        - name: JAVA_HOME
+          value: /usr/lib/jvm/java-21
+
         # Point Testcontainers/Dev Services at the rootless Podman Docker-API socket
         # (started by the start-podman-socket command below).
         - name: DOCKER_HOST
@@ -52,7 +57,7 @@ components:
         # registry prompt (Testcontainers can't answer it). Equivalent to setting
         # quarkus.datasource.devservices.image-name in application.properties.
         - name: QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME
-          value: docker.io/library/mysql:9.5
+          value: docker.io/library/mysql:8.4
 
         # Bound the Maven launcher JVM. The forked Quarkus dev JVM uses its
         # container-aware default (~25% of the memory limit), which is sized fine
@@ -100,6 +105,22 @@ components:
       size: 15Gi
 
 commands:
+  # Prepend $JAVA_HOME/bin to PATH for interactive terminals. This is done in a
+  # shell rc file rather than the container `env:` block on purpose: Kubernetes does
+  # NOT expand $PATH (or $(PATH)) against the image's existing PATH, so writing
+  # PATH: "$JAVA_HOME/bin:$PATH" in env would replace PATH with a broken literal and
+  # lose mvn/podman/etc. Appending the export to ~/.bashrc lets the shell expand
+  # $PATH correctly at terminal startup. Idempotent; safe to re-run every start.
+  - id: configure-java-path
+    exec:
+      component: tools
+      commandLine: |
+        grep -q 'devfile: java-21 on PATH' ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'EOF'
+        # devfile: java-21 on PATH
+        export JAVA_HOME=/usr/lib/jvm/java-21
+        export PATH="$JAVA_HOME/bin:$PATH"
+        EOF
+
   # Starts the Docker-compatible Podman socket that DOCKER_HOST points at.
   # Daemonless Podman needs this started explicitly; nohup keeps it alive after
   # the postStart shell exits.
@@ -131,4 +152,5 @@ commands:
 
 events:
   postStart:
+    - configure-java-path
     - start-podman-socket
