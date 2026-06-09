@@ -1,0 +1,134 @@
+schemaVersion: 2.2.0
+metadata:
+  name: quarkus-devservices-mysql
+  displayName: Quarkus Dev Services (MySQL) on Dev Spaces
+  description: >-
+    Quarkus dev mode with Dev Services / Testcontainers MySQL, backed by the
+    workspace's own rootless Podman (nested containers).
+
+# One PVC per workspace, so the Maven cache and Podman image layers live on
+# persistent storage instead of the pod's ephemeral filesystem. This is what
+# keeps a large MySQL image pull from filling ephemeral storage and getting the
+# pod evicted ("workspace unresponsive").
+attributes:
+  controller.devfile.io/storage-type: per-workspace
+
+components:
+  - name: tools
+    container:
+      # Must be the udi-rhel9 3.25 tag or newer for nested-container run support.
+      # Pin this to match the Dev Spaces version installed on your cluster.
+      image: registry.redhat.io/devspaces/udi-rhel9:3.27
+
+      # Resource budget. The editor (che-code) runs in its OWN container with its
+      # own limits, so this only has to cover what runs HERE: the Maven JVM, the
+      # forked Quarkus dev JVM, and the nested MySQL container (whose RAM is charged
+      # to this container's cgroup). request<limit = Burstable; set request==limit
+      # if you want Guaranteed QoS and the strongest protection from node eviction.
+      memoryRequest: "4Gi"
+      memoryLimit: "8Gi"
+      cpuRequest: "1"
+      cpuLimit: "4"
+
+      env:
+        # Point Testcontainers/Dev Services at the rootless Podman Docker-API socket
+        # (started by the start-podman-socket command below).
+        - name: DOCKER_HOST
+          value: unix:///tmp/podman.sock
+
+        # Ryuk (Testcontainers' reaper) wants a privileged container + socket mount,
+        # which the OpenShift SCC won't grant. Disable it; stray containers are cleaned
+        # up by clean dev-mode shutdown and by workspace recreation.
+        - name: TESTCONTAINERS_RYUK_DISABLED
+          value: "true"
+
+        # Skip Testcontainers' startup self-checks (notably the disk-space probe),
+        # which misread Podman's rootless storage layout. Does NOT affect container
+        # readiness/wait strategies.
+        - name: TESTCONTAINERS_CHECKS_DISABLE
+          value: "true"
+
+        # Fully-qualify the MySQL image so Podman never hits an interactive short-name
+        # registry prompt (Testcontainers can't answer it). Equivalent to setting
+        # quarkus.datasource.devservices.image-name in application.properties.
+        - name: QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME
+          value: docker.io/library/mysql:8.4
+
+        # Bound the Maven launcher JVM. The forked Quarkus dev JVM uses its
+        # container-aware default (~25% of the memory limit), which is sized fine
+        # against the 8Gi limit above.
+        - name: MAVEN_OPTS
+          value: "-Xmx1g -Xss128m"
+
+      endpoints:
+        # Quarkus HTTP. Exposed publicly via the Dev Spaces gateway (which terminates
+        # TLS); the app itself serves plain HTTP on 8080.
+        - name: quarkus-http
+          targetPort: 8080
+          exposure: public
+          protocol: http
+          attributes:
+            discoverable: true
+            urlRewriteSupported: true
+        # JDWP debug port for attaching the IDE debugger to dev mode.
+        - name: quarkus-debug
+          targetPort: 5005
+          exposure: internal
+          protocol: tcp
+
+      volumeMounts:
+        # Maven local repository – persists downloaded dependencies across restarts.
+        - name: m2
+          path: /home/user/.m2
+        # Podman rootless graph storage – keeps pulled image layers on the PVC instead
+        # of ephemeral storage. If your PVC backend gives you storage-driver or
+        # permission errors here, remove this one volume + mount and Podman falls back
+        # to the container filesystem (then rely on the resource limits / a larger
+        # ephemeral-storage request).
+        - name: podman-storage
+          path: /home/user/.local/share/containers
+
+      # Mount the cloned project source into the container at ${PROJECT_SOURCE}.
+      mountSources: true
+
+  - name: m2
+    volume:
+      size: 10Gi
+
+  - name: podman-storage
+    volume:
+      size: 15Gi
+
+commands:
+  # Starts the Docker-compatible Podman socket that DOCKER_HOST points at.
+  # Daemonless Podman needs this started explicitly; nohup keeps it alive after
+  # the postStart shell exits.
+  - id: start-podman-socket
+    exec:
+      component: tools
+      commandLine: nohup podman system service --time=0 unix:///tmp/podman.sock > /tmp/podman-service.log 2>&1 &
+
+  # Run the app in Quarkus dev mode. Dev Services starts MySQL automatically.
+  # Binding to 0.0.0.0 lets the Dev Spaces route reach the app.
+  - id: dev
+    exec:
+      component: tools
+      commandLine: mvn quarkus:dev -Dquarkus.http.host=0.0.0.0
+      workingDir: ${PROJECT_SOURCE}
+      group:
+        kind: run
+        isDefault: true
+
+  # Package the application without launching dev mode.
+  - id: package
+    exec:
+      component: tools
+      commandLine: mvn -DskipTests package
+      workingDir: ${PROJECT_SOURCE}
+      group:
+        kind: build
+        isDefault: true
+
+events:
+  postStart:
+    - start-podman-socket
