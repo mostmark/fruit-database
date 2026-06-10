@@ -66,14 +66,18 @@ components:
           value: "-Xmx1g -Xss128m"
 
       endpoints:
-        # Quarkus HTTP. Exposed publicly via the Dev Spaces gateway (which terminates
-        # TLS); the app itself serves plain HTTP on 8080.
-        - name: quarkus-http
+        # App HTTP, exposed publicly via the Dev Spaces gateway (which terminates TLS);
+        # the app serves plain HTTP on 8080.
+        # IMPORTANT: this endpoint must NOT be named "quarkus-http" and must NOT be
+        # discoverable. A discoverable endpoint gets its own Service of the same name,
+        # and Kubernetes then injects QUARKUS_HTTP_PORT=tcp://<clusterIP>:8080 into the
+        # pod. SmallRye Config maps that env var onto quarkus.http.port, and the build
+        # (and runtime) then fail trying to parse "tcp://..." as an integer port.
+        - name: http-app
           targetPort: 8080
           exposure: public
           protocol: http
           attributes:
-            discoverable: true
             urlRewriteSupported: true
         # JDWP debug port for attaching the IDE debugger to dev mode.
         - name: quarkus-debug
