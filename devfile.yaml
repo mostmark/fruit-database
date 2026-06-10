@@ -25,8 +25,8 @@ components:
       # forked Quarkus dev JVM, and the nested MySQL container (whose RAM is charged
       # to this container's cgroup). request<limit = Burstable; set request==limit
       # if you want Guaranteed QoS and the strongest protection from node eviction.
-      memoryRequest: "4Gi"
-      memoryLimit: "8Gi"
+      memoryRequest: "2Gi"
+      memoryLimit: "4Gi"
       cpuRequest: "1"
       cpuLimit: "4"
 
