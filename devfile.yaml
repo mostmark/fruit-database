@@ -13,6 +13,17 @@ metadata:
 attributes:
   controller.devfile.io/storage-type: per-workspace
 
+# Cloned automatically when the workspace is created from a raw devfile URL or the
+# Dev Spaces dashboard. Harmless when starting from a git-repo URL (Dev Spaces
+# clones that repo itself and ${PROJECT_SOURCE} resolves the same way).
+projects:
+  - name: fruit-database
+    git:
+      remotes:
+        origin: https://github.com/mostmark/fruit-database.git
+      checkoutFrom:
+        revision: main
+
 components:
   - name: tools
     container:
@@ -25,8 +36,8 @@ components:
       # forked Quarkus dev JVM, and the nested MySQL container (whose RAM is charged
       # to this container's cgroup). request<limit = Burstable; set request==limit
       # if you want Guaranteed QoS and the strongest protection from node eviction.
-      memoryRequest: "2Gi"
-      memoryLimit: "4Gi"
+      memoryRequest: "4Gi"
+      memoryLimit: "8Gi"
       cpuRequest: "1"
       cpuLimit: "4"
 
@@ -37,7 +48,7 @@ components:
           value: /usr/lib/jvm/java-21
 
         # Point Testcontainers/Dev Services at the rootless Podman Docker-API socket
-        # (started by the start-podman-socket command below).
+        # (started/verified by the ensure-podman-socket helper below).
         - name: DOCKER_HOST
           value: unix:///tmp/podman.sock
 
@@ -57,11 +68,11 @@ components:
         # registry prompt (Testcontainers can't answer it). Equivalent to setting
         # quarkus.datasource.devservices.image-name in application.properties.
         - name: QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME
-          value: docker.io/library/mysql:9.7
+          value: docker.io/library/mysql:8.4
 
-        # Bound the Maven launcher JVM. The forked Quarkus dev JVM uses its
-        # container-aware default (~25% of the memory limit), which is sized fine
-        # against the 8Gi limit above.
+        # Bound the Maven launcher JVM. The forked Quarkus dev JVM additionally takes
+        # its container-aware default (~25% of memoryLimit). Keep this consistent with
+        # the memoryLimit set above if you change it.
         - name: MAVEN_OPTS
           value: "-Xmx1g -Xss128m"
 
@@ -122,33 +133,72 @@ commands:
         grep -q 'devfile: java-21 on PATH' ~/.bashrc 2>/dev/null || cat >> ~/.bashrc <<'EOF'
         # devfile: java-21 on PATH
         export JAVA_HOME=/usr/lib/jvm/java-21
-        export PATH="$JAVA_HOME/bin:$PATH"
+        export PATH="$JAVA_HOME/bin:$HOME/bin:$PATH"
         EOF
 
-  # Starts the Docker-compatible Podman socket that DOCKER_HOST points at.
-  # Daemonless Podman needs this started explicitly; nohup keeps it alive after
-  # the postStart shell exits.
-  - id: start-podman-socket
+  # Installs a helper script that starts the Podman socket ONLY if it is not already
+  # answering, then blocks until it responds to /_ping. Writing it to ~/bin (on the
+  # home PVC) rather than inlining it keeps the YAML readable and lets you run
+  # `ensure-podman-socket` by hand from any terminal.
+  #
+  # Why a script instead of relying on postStart alone: a backgrounded process
+  # started from a transient postStart exec session is not guaranteed to survive,
+  # and /tmp is ephemeral, so both the socket file and the process disappear on
+  # every workspace restart. Making this idempotent and calling it from the run
+  # commands means a missing socket self-heals instead of failing the build.
+  - id: install-podman-socket-helper
     exec:
       component: tools
-      commandLine: nohup podman system service --time=0 unix:///tmp/podman.sock > /tmp/podman-service.log 2>&1 &
+      commandLine: |
+        mkdir -p ~/bin && cat > ~/bin/ensure-podman-socket <<'EOF'
+        #!/usr/bin/env bash
+        # Idempotent: start the Docker-compatible Podman socket if it isn't up, then wait.
+        SOCK=/tmp/podman.sock
+        if ! curl -sf --unix-socket "$SOCK" http://d/_ping >/dev/null 2>&1; then
+          rm -f "$SOCK"
+          nohup podman system service --time=0 "unix://$SOCK" > /tmp/podman-service.log 2>&1 &
+        fi
+        for i in $(seq 1 30); do
+          curl -sf --unix-socket "$SOCK" http://d/_ping >/dev/null 2>&1 && exit 0
+          sleep 1
+        done
+        echo "ERROR: Podman socket at $SOCK did not become ready. See /tmp/podman-service.log" >&2
+        cat /tmp/podman-service.log >&2
+        exit 1
+        EOF
+        chmod +x ~/bin/ensure-podman-socket
+
+  # Pre-pull the Dev Services database image on first start, so the very first
+  # `mvn quarkus:dev` isn't competing with a large image pull. Non-fatal: a failure
+  # here (offline, bad tag) must not block the workspace from starting.
+  - id: prefetch-devservices-image
+    exec:
+      component: tools
+      commandLine: |
+        ~/bin/ensure-podman-socket || exit 0
+        podman image exists "$QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME" \
+          || podman pull "$QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME" \
+          || echo "WARN: could not pre-pull $QUARKUS_DATASOURCE_DEVSERVICES_IMAGE_NAME; Dev Services will pull it on demand."
 
   # Run the app in Quarkus dev mode. Dev Services starts MySQL automatically.
+  # The socket is ensured (and waited for) first, so this works even if postStart
+  # was skipped, or the socket died since the workspace started.
   # Binding to 0.0.0.0 lets the Dev Spaces route reach the app.
   - id: dev
     exec:
       component: tools
-      commandLine: mvn quarkus:dev -Dquarkus.http.host=0.0.0.0
+      commandLine: ~/bin/ensure-podman-socket && mvn quarkus:dev -Dquarkus.http.host=0.0.0.0
       workingDir: ${PROJECT_SOURCE}
       group:
         kind: run
         isDefault: true
 
-  # Package the application without launching dev mode.
+  # Package the application. Also ensures the socket: `mvn package` runs Quarkus
+  # tests/augmentation that can trigger Dev Services too.
   - id: package
     exec:
       component: tools
-      commandLine: mvn -DskipTests package
+      commandLine: ~/bin/ensure-podman-socket && mvn -DskipTests package
       workingDir: ${PROJECT_SOURCE}
       group:
         kind: build
@@ -157,4 +207,5 @@ commands:
 events:
   postStart:
     - configure-java-path
-    - start-podman-socket
+    - install-podman-socket-helper
+    - prefetch-devservices-image
