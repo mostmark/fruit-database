@@ -1,9 +1,10 @@
 ####
 # This Dockerfile is used in order to build a container that runs the Quarkus application in JVM mode
+# from the uber-jar produced by this build (quarkus.package.jar.type=uber-jar)
 #
 # Before building the container image run:
 #
-# ./mvnw package
+# mvn package
 #
 # Then, build the image with:
 #
@@ -85,11 +86,7 @@ FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.24
 ENV LANGUAGE='en_US:en'
 
 
-# We make four distinct layers so if there are application changes the library layers can be re-used
-COPY --chown=185 target/quarkus-app/lib/ /deployments/lib/
-COPY --chown=185 target/quarkus-app/*.jar /deployments/
-COPY --chown=185 target/quarkus-app/app/ /deployments/app/
-COPY --chown=185 target/quarkus-app/quarkus/ /deployments/quarkus/
+COPY --chown=185 target/*-runner.jar /deployments/quarkus-run.jar
 
 EXPOSE 8080
 USER 185
