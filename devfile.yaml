@@ -12,6 +12,17 @@ metadata:
 # pod evicted ("workspace unresponsive").
 attributes:
   controller.devfile.io/storage-type: per-workspace
+  # Make the hostname "mysql" resolve to the workspace itself, so the %prod
+  # JDBC URL (jdbc:mysql://mysql:3306/fruitdb) used on OpenShift also works when
+  # running the runner jar in the terminal against a local Podman MySQL started
+  # with -p 3306:3306. Note: this shadows DNS for the short name "mysql" inside
+  # the workspace; use mysql.<namespace>.svc to reach a real cluster Service.
+  pod-overrides:
+    spec:
+      hostAliases:
+        - ip: 127.0.0.1
+          hostnames:
+            - mysql
 
 # Cloned automatically when the workspace is created from a raw devfile URL or the
 # Dev Spaces dashboard. Harmless when starting from a git-repo URL (Dev Spaces
